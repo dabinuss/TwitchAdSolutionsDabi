@@ -29,9 +29,9 @@ OUT      = Path(__file__).parent / "captures"
 
 # Deutschsprachige Channels — der Reihe nach probiert bis einer live ist
 DE_CHANNELS = [
-    "montanablack88", "papaplatte", "trymacs", "knossi",
-    "handofblood", "elotrix", "rewinside", "dner",
-    "eligella", "ungespielt",
+    "montanablack88", "eliasn97", "trymacs", "handofblood",
+    "papaplatte", "knossi", "elotrix", "rewinside",
+    "dner", "eligella", "ungespielt", "celebrimbor__",
 ]
 
 # In den Browser injiziert (vor Twitch-Code) — nur Worker-Blob abfangen
@@ -66,15 +66,14 @@ def fetch_url(url: str) -> str:
 def check_live_via_api(channel: str) -> bool:
     """Schnellcheck ob ein Channel live ist (kein Auth nötig)."""
     try:
-        url = f"https://www.twitch.tv/{channel}"
         req = urllib.request.Request(
-            f"https://gql.twitch.tv/gql",
+            "https://gql.twitch.tv/gql",
             data=json.dumps([{
-                "operationName": "StreamMetadata",
+                "operationName": "UseLive",
                 "variables": {"channelLogin": channel},
                 "extensions": {"persistedQuery": {
                     "version": 1,
-                    "sha256Hash": "a647c2a13599e5991e175155f798ca7f1ecddde73f7f341f39009c14dbf59aa8"
+                    "sha256Hash": "639d5f11bfb8bf3053b424d9ef650d04c4ebb7d94711d644afb08fe9a0fad5d9"
                 }}
             }]).encode(),
             headers={
@@ -86,8 +85,8 @@ def check_live_via_api(channel: str) -> bool:
         )
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
-            stream = data[0].get("data", {}).get("user", {}) or {}
-            return stream.get("stream") is not None
+            user = (data[0].get("data") or {}).get("user") or {}
+            return user.get("stream") is not None
     except Exception:
         return False  # Im Zweifel trotzdem versuchen
 
@@ -136,6 +135,9 @@ async def main():
         "#EXT-X-DISCONTINUITY", "#EXT-X-PROGRAM-DATE-TIME",
         "#EXT-X-SESSION-DATA", "#EXT-X-INDEPENDENT-SEGMENTS",
         "#EXT-X-ENDLIST", "#EXT-X-KEY",
+        "#EXT-X-DATERANGE", "#EXT-X-START",
+        "#EXT-X-TWITCH-LIVE-SEQUENCE", "#EXT-X-TWITCH-ELAPSED-SECS",
+        "#EXT-X-TWITCH-TOTAL-SECS", "#EXT-X-PLAYLIST-TYPE",
     }
     seen_m3u8_urls = set()
     stream_active  = False
