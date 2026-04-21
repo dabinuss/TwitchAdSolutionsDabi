@@ -353,21 +353,7 @@ twitch-videoad.js text/javascript
                             }
                         } else if (e.data.key == 'TriggeredPlayerReload') {
                             HasTriggeredPlayerReload = true;
-                        } else if (e.data.key == 'WorkerEvalFailed') {
-                            console.error('[TAS ERROR] Worker eval failed — ad blocking inactive: ' + e.data.error);
-                            updateAdblockBanner({ hasAds: true, workerFailed: true });
-                    } else if (e.data.key == 'AdBreakEnded') {
-                            if (window.tasStats) {
-                                window.tasStats.adBreaks.push(e.data.record);
-                                if (window.tasStats.adBreaks.length > 20) window.tasStats.adBreaks.shift();
-                                window.tasStats.totalBlocked++;
-                                const bt = e.data.record.backupType;
-                                if (bt && bt !== 'none') {
-                                    if (!window.tasStats.backupSuccessRate[bt]) window.tasStats.backupSuccessRate[bt] = { ok: 0, fail: 0 };
-                                    window.tasStats.backupSuccessRate[bt].ok++;
-                                }
-                            }
-                    } else if (e.data.key == 'SimulateAds') {
+                        } else if (e.data.key == 'SimulateAds') {
                             SimulatedAdsDepth = e.data.value;
                             console.log('SimulatedAdsDepth: ' + SimulatedAdsDepth);
                         } else if (e.data.key == 'AllSegmentsAreAdSegments') {
@@ -407,6 +393,20 @@ twitch-videoad.js text/javascript
                         doTwitchPlayerTask(true, false);
                     } else if (e.data.key == 'ReloadPlayer') {
                         doTwitchPlayerTask(false, true, e.data.kind);
+                    } else if (e.data.key == 'WorkerEvalFailed') {
+                        console.error('[TAS ERROR] Worker eval failed — ad blocking inactive: ' + e.data.error);
+                        updateAdblockBanner({ hasAds: true, workerFailed: true });
+                    } else if (e.data.key == 'AdBreakEnded') {
+                        if (window.tasStats) {
+                            window.tasStats.adBreaks.push(e.data.record);
+                            if (window.tasStats.adBreaks.length > 20) window.tasStats.adBreaks.shift();
+                            window.tasStats.totalBlocked++;
+                            const bt = e.data.record.backupType;
+                            if (bt && bt !== 'none') {
+                                if (!window.tasStats.backupSuccessRate[bt]) window.tasStats.backupSuccessRate[bt] = { ok: 0, fail: 0 };
+                                window.tasStats.backupSuccessRate[bt].ok++;
+                            }
+                        }
                     }
                 });
                 this.addEventListener('message', async event => {
