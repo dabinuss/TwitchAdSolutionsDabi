@@ -1,4 +1,17 @@
-twitch-videoad.js text/javascript
+// ==UserScript==
+// @name         Twitch AdSolutions (vaft)
+// @namespace    https://github.com/dabinuss/TwitchAdSolutionsDabi
+// @version      55.3
+// @description  Blocks Twitch ads via backup stream + segment stripping
+// @author       dabinuss
+// @match        https://www.twitch.tv/*
+// @match        https://player.twitch.tv/*
+// @match        https://embed.twitch.tv/*
+// @grant        none
+// @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/dabinuss/TwitchAdSolutionsDabi/master/vaft.js
+// @downloadURL  https://raw.githubusercontent.com/dabinuss/TwitchAdSolutionsDabi/master/vaft.js
+// ==/UserScript==
 (function() {
     if ( /(^|\.)twitch\.tv$/.test(document.location.hostname) === false ) { return; }
     // Skip injection in nested frames that aren't legitimate Twitch embed contexts.
