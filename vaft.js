@@ -1148,21 +1148,37 @@ twitch-videoad.js text/javascript
         }
     }
     function blockOverlayAds() {
+        // CSS injection — blocks elements before they render (more robust than JS hide)
+        const style = document.createElement('style');
+        style.textContent = `
+            /* pushdown display ad (stream shrinks, banner above) */
+            .pushdown-sda, .pushdown-sda__landscape-upsell,
+            .stream-display-ad__iframe_pushdown,
+            .stream-display-ad__iframe_pushdown--visible { display: none !important; }
+            /* audio ad overlay */
+            .audio-ax-overlay-base { display: none !important; }
+            /* channel skin overlays / banner / ribbon */
+            .channel-skins-overlay__background,
+            .channel-skins-banner__background,
+            .channel-skins-ribbon__v2-container,
+            .channel-skins-ribbon__container { display: none !important; }
+            /* generic ad containers */
+            [data-test-selector="ad-banner-default-container"],
+            [data-a-target="ad-overlay"],
+            [data-a-target="player-ad-overlay"],
+            [data-a-target="ad-card-component"] { display: none !important; }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+
+        // MutationObserver fallback for dynamically added elements with runtime class names
         const adSelectors = [
+            '.pushdown-sda',
+            '.stream-display-ad__iframe_pushdown',
+            '.audio-ax-overlay-base',
+            '[class*="stream-display-ad"]',
+            '[class*="pushdown-sda"]',
             '[data-test-selector="ad-banner-default-container"]',
             '[data-a-target="ad-overlay"]',
-            '[data-a-target="player-ad-overlay"]',
-            '[data-a-target="ad-card-component"]',
-            '.stream-display-ad',
-            '[class*="StreamDisplayAd"]',
-            '[class*="stream-display-ad"]',
-            '[class*="pushdown-ad"]',
-            '[class*="audio-ad-overlay"]',
-            '[class*="AudioAdOverlay"]',
-            '.channel-skins-video-overlay',
-            '[class*="ChannelSkins"]',
-            '[class*="brand-display"]',
-            '[class*="BrandDisplay"]',
         ];
         function hideAds(root) {
             for (const sel of adSelectors) {
@@ -1176,7 +1192,6 @@ twitch-videoad.js text/javascript
                 } catch (e) {}
             }
         }
-        hideAds(document);
         new MutationObserver((mutations) => {
             for (const m of mutations) {
                 for (const node of m.addedNodes) {
