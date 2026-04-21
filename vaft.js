@@ -296,6 +296,8 @@ twitch-videoad.js text/javascript
                                         Urls: [],// xxx.m3u8 -> { Resolution: "284x160", FrameRate: 30.0 }
                                         ResolutionList: [],
                                         BackupEncodingsM3U8Cache: [],
+                                        BackupEncodingsM3U8CacheTime: [],
+                                        BackupFetchInProgress: [],
                                         ActiveBackupPlayerType: null,
                                         IsMidroll: false,
                                         IsStrippingAdSegments: false,
@@ -557,21 +559,34 @@ twitch-videoad.js text/javascript
                     // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
                     let isFreshM3u8 = false;
                     let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
+                    // Expire cache after 4 minutes (access tokens last ~5 min)
+                    if (encodingsM3u8 && Date.now() - (streamInfo.BackupEncodingsM3U8CacheTime[playerType] || 0) > 240000) {
+                        encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
+                    }
                     if (!encodingsM3u8) {
                         isFreshM3u8 = true;
-                        try {
-                            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, realPlayerType);
-                            if (accessTokenResponse.status === 200) {
-                                const accessToken = await accessTokenResponse.json();
-                                const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
-                                urlInfo.searchParams.set('sig', accessToken.data.streamPlaybackAccessToken.signature);
-                                urlInfo.searchParams.set('token', accessToken.data.streamPlaybackAccessToken.value);
-                                const encodingsM3u8Response = await realFetch(urlInfo.href);
-                                if (encodingsM3u8Response.status === 200) {
-                                    encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
-                                }
-                            }
-                        } catch (err) {}
+                        // Deduplicate concurrent fetches — reuse in-flight Promise if one exists
+                        if (!streamInfo.BackupFetchInProgress[playerType]) {
+                            streamInfo.BackupFetchInProgress[playerType] = (async () => {
+                                try {
+                                    const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, realPlayerType);
+                                    if (accessTokenResponse.status === 200) {
+                                        const accessToken = await accessTokenResponse.json();
+                                        const urlInfo = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
+                                        urlInfo.searchParams.set('sig', accessToken.data.streamPlaybackAccessToken.signature);
+                                        urlInfo.searchParams.set('token', accessToken.data.streamPlaybackAccessToken.value);
+                                        const encodingsM3u8Response = await realFetch(urlInfo.href);
+                                        if (encodingsM3u8Response.status === 200) {
+                                            streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
+                                            streamInfo.BackupEncodingsM3U8CacheTime[playerType] = Date.now();
+                                        }
+                                    }
+                                } catch (err) {}
+                                streamInfo.BackupFetchInProgress[playerType] = null;
+                            })();
+                        }
+                        await streamInfo.BackupFetchInProgress[playerType];
+                        encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
                     }
                     if (encodingsM3u8) {
                         try {
@@ -620,7 +635,8 @@ twitch-videoad.js text/javascript
             }
             // TODO: Improve hevc stripping. It should always strip when there is a codec mismatch (both ways)
             const stripHevc = isHevc && streamInfo.ModifiedM3U8;
-            if (IsAdStrippingEnabled || stripHevc) {
+            // Skip stripping if backup stream is confirmed ad-free (unless HEVC codec mismatch)
+            if ((IsAdStrippingEnabled && !backupM3u8) || stripHevc) {
                 textStr = stripAdSegments(textStr, stripHevc, streamInfo);
             }
         } else if (streamInfo.IsShowingAd) {
@@ -630,6 +646,7 @@ twitch-videoad.js text/javascript
             streamInfo.NumStrippedAdSegments = 0;
             streamInfo.ActiveBackupPlayerType = null;
             streamInfo.RequestedAds.clear();
+            streamInfo.FetchedTriggerUrls.clear();
             if (streamInfo.IsUsingModifiedM3U8 || ReloadPlayerAfterAd) {
                 streamInfo.IsUsingModifiedM3U8 = false;
                 streamInfo.LastPlayerReload = Date.now();
