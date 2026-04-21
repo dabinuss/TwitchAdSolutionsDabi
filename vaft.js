@@ -299,7 +299,12 @@ twitch-videoad.js text/javascript
                                         ActiveBackupPlayerType: null,
                                         IsMidroll: false,
                                         IsStrippingAdSegments: false,
-                                        NumStrippedAdSegments: 0
+                                        NumStrippedAdSegments: 0,
+                                        AdRollType: null,
+                                        AdDuration: null,
+                                        AdPodLength: null,
+                                        AdPodPosition: null,
+                                        FetchedTriggerUrls: new Set()
                                     };
                                     const lines = encodingsM3u8.replaceAll('\r', '').split('\n');
                                     for (let i = 0; i < lines.length - 1; i++) {
@@ -452,6 +457,26 @@ twitch-videoad.js text/javascript
         }
         return closestResolutionUrl;
     }
+    function extractAdInfo(textStr) {
+        const info = { rollType: null, adDuration: null, podLength: null, podPosition: null, triggerUrl: null };
+        for (const line of textStr.replaceAll('\r', '').split('\n')) {
+            if (!line.startsWith('#EXT-X-DATERANGE:')) continue;
+            if (line.includes('CLASS="twitch-stitched-ad"')) {
+                const m = line.match(/X-TV-TWITCH-AD-ROLL-TYPE="([^"]+)"/);
+                if (m) info.rollType = m[1];
+                const d = line.match(/(?:^|,)DURATION=([0-9.]+)/);
+                if (d) info.adDuration = parseFloat(d[1]);
+                const pl = line.match(/X-TV-TWITCH-AD-POD-LENGTH="([^"]+)"/);
+                if (pl) info.podLength = parseInt(pl[1]);
+                const pp = line.match(/X-TV-TWITCH-AD-POD-POSITION="([^"]+)"/);
+                if (pp) info.podPosition = parseInt(pp[1]);
+            } else if (line.includes('CLASS="twitch-trigger"')) {
+                const t = line.match(/X-TV-TWITCH-TRIGGER-URL="([^"]+)"/);
+                if (t) info.triggerUrl = t[1];
+            }
+        }
+        return info;
+    }
     async function processM3U8(url, textStr, realFetch) {
         const streamInfo = StreamInfosByUrl[url];
         if (!streamInfo) {
@@ -461,16 +486,29 @@ twitch-videoad.js text/javascript
             HasTriggeredPlayerReload = false;
             streamInfo.LastPlayerReload = Date.now();
         }
-        const haveAdTags = textStr.includes(AdSignifier) || SimulatedAdsDepth > 0;
+        const haveAdTags = textStr.includes(AdSignifier) || textStr.includes('STREAM-SOURCE="Amazon|') || SimulatedAdsDepth > 0;
         if (haveAdTags) {
-            streamInfo.IsMidroll = textStr.includes('"MIDROLL"') || textStr.includes('"midroll"');
+            const adInfo = extractAdInfo(textStr);
+            streamInfo.IsMidroll = (adInfo.rollType === 'MIDROLL') || textStr.includes('"MIDROLL"') || textStr.includes('"midroll"');
+            streamInfo.AdRollType = adInfo.rollType;
+            streamInfo.AdDuration = adInfo.adDuration;
+            streamInfo.AdPodLength = adInfo.podLength;
+            streamInfo.AdPodPosition = adInfo.podPosition;
+            if (adInfo.triggerUrl && !streamInfo.FetchedTriggerUrls.has(adInfo.triggerUrl)) {
+                streamInfo.FetchedTriggerUrls.add(adInfo.triggerUrl);
+                realFetch(adInfo.triggerUrl).catch(() => {});
+            }
             if (!streamInfo.IsShowingAd) {
                 streamInfo.IsShowingAd = true;
                 postMessage({
                     key: 'UpdateAdBlockBanner',
                     isMidroll: streamInfo.IsMidroll,
                     hasAds: streamInfo.IsShowingAd,
-                    isStrippingAdSegments: false
+                    isStrippingAdSegments: false,
+                    adRollType: streamInfo.AdRollType,
+                    adDuration: streamInfo.AdDuration,
+                    adPodLength: streamInfo.AdPodLength,
+                    adPodPosition: streamInfo.AdPodPosition
                 });
             }
             if (!streamInfo.IsMidroll) {
@@ -609,7 +647,11 @@ twitch-videoad.js text/javascript
             isMidroll: streamInfo.IsMidroll,
             hasAds: streamInfo.IsShowingAd,
             isStrippingAdSegments: streamInfo.IsStrippingAdSegments,
-            numStrippedAdSegments: streamInfo.NumStrippedAdSegments
+            numStrippedAdSegments: streamInfo.NumStrippedAdSegments,
+            adRollType: streamInfo.AdRollType,
+            adDuration: streamInfo.AdDuration,
+            adPodLength: streamInfo.AdPodLength,
+            adPodPosition: streamInfo.AdPodPosition
         });
         return textStr;
     }
@@ -788,7 +830,23 @@ twitch-videoad.js text/javascript
             }
             if (adBlockDiv != null) {
                 isActivelyStrippingAds = data.isStrippingAdSegments;
-                adBlockDiv.P.textContent = 'Blocking' + (data.isMidroll ? ' midroll' : '') + ' ads' + (data.isStrippingAdSegments ? ' (stripping)' : '');// + (data.numStrippedAdSegments > 0 ? ` (${data.numStrippedAdSegments})` : '');
+                let bannerText = 'Blocking';
+                if (data.adRollType) {
+                    bannerText += ' ' + data.adRollType.toLowerCase();
+                } else if (data.isMidroll) {
+                    bannerText += ' midroll';
+                }
+                bannerText += ' ad';
+                if (data.adPodLength > 1) {
+                    bannerText += ` ${(data.adPodPosition ?? 0) + 1}/${data.adPodLength}`;
+                }
+                if (data.adDuration) {
+                    bannerText += ` (~${Math.round(data.adDuration)}s)`;
+                }
+                if (data.isStrippingAdSegments) {
+                    bannerText += ' (stripping)';
+                }
+                adBlockDiv.P.textContent = bannerText;
                 adBlockDiv.style.display = data.hasAds && playerBufferState.isLive ? 'block' : 'none';
             }
         }
