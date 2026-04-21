@@ -1,129 +1,102 @@
-# Test-Anleitung: Twitch Ad-Blocker Analyse
+# Twitch Ad Capture Tool
 
-## Ordnerstruktur
+Vollautomatisch — kein manuelles Eingreifen nötig.
+
+## Erstmalige Installation
 
 ```
-testing/
-├── capture-worker.js       — Speichert Worker-Blob + Ad-M3U8-Dateien automatisch
-├── check-adsignifier.js    — Prüft ob bekannte Ad-Signifier noch aktuell sind
-└── ANLEITUNG.md            — Diese Datei
+install.bat
 ```
 
----
-
-## Schritt 1 — Voraussetzungen
-
-- **Browser:** Chrome oder Firefox
-- **Zustand:** vaft.js NICHT aktiv (Tampermonkey deaktivieren oder im normalen Profil testen)
-- **Twitch-Account:** Nicht eingeloggt → garantierte Pre-Roll-Ads
+Braucht Python (python.org). Installiert Playwright + Chromium automatisch.
 
 ---
 
-## Schritt 2 — HAR-Datei aufzeichnen (Netzwerkstruktur)
+## Capture starten
 
-1. Twitch-Channel öffnen (noch nicht im Stream)
-2. `F12` → Reiter **Network**
-3. Haken setzen bei **Preserve log**
-4. Stream starten, ca. 30 Sekunden warten (bis Werbung durch ist)
-5. Rechtsklick im Network-Reiter → **Save all as HAR with content**
-6. Datei in `testing/captures/` speichern (Ordner selbst anlegen)
-
-**Was suchen in der HAR:**
-- Requests auf `usher.ttvnw.net` → Encodings-M3U8 (Streamauflösungen)
-- Requests auf `*.hls.twitchsolutions.com` oder `video-weaver.*.hls.live.tv` → Segment-M3U8 mit Ads
-- GQL-Requests auf `gql.twitch.tv` → Access-Token-Anfragen
-
----
-
-## Schritt 3 — Worker-Blob + Ad-M3U8 automatisch speichern
-
-1. Twitch-Channel öffnen (noch nicht laden)
-2. `F12` → **Console**
-3. Inhalt von `capture-worker.js` einfügen → Enter
-4. Seite **neu laden** (F5) — der Hook ist jetzt aktiv
-5. Stream starten, auf Werbung warten
-6. Dateien werden automatisch heruntergeladen:
-   - `twitch-worker-[ts].js` — Twitch's HLS-Worker (das wichtigste)
-   - `twitch-ad-m3u8-[ts].m3u8` — M3U8-Datei während einer Werbung
-7. Am Ende in der Console eingeben: `saveCaptured()` → JSON-Zusammenfassung
-
----
-
-## Schritt 4 — AdSignifier prüfen
-
-Wenn unklar ist ob `stitched` noch der richtige Signifier ist:
-
-1. `F12` → **Console**
-2. Inhalt von `check-adsignifier.js` einfügen → Enter
-3. Stream öffnen, Werbung abwarten
-4. In der Console eingeben: `getSignifierReport()`
-5. Die Ausgabe zeigt welche bekannten Tags gefunden wurden und welche unbekannten `#EXT-X-*`-Tags auftauchen
-
-**Wenn ein unbekannter Tag erscheint:** In `vaft.js` Zeile 13 `AdSignifier` anpassen:
-```js
-scope.AdSignifier = 'stitched'; // ← ggf. hier ändern
+```bat
+run.bat                  REM Standard: esl_csgo, 90 Sekunden
+run.bat xqc              REM Channel wählen, 90 Sekunden
+run.bat xqc 120          REM Channel + Dauer in Sekunden
 ```
 
----
-
-## Schritt 5 — Worker-Blob analysieren
-
-Die gespeicherte `twitch-worker-*.js` enthält Twitch's HLS-Worker-Code.
-
-**Was prüfen:**
-- Ist die Funktion zum Fetchen von M3U8 noch gleich aufgebaut?
-- Gibt es neue Verschlüsselung oder Obfuskation?
-- Werden neue Worker-Message-Keys verwendet?
-
-Relevante Stellen in `vaft.js` die davon abhängen:
-- `hookWorkerFetch()` — Hook-Punkt im Worker
-- `getWasmWorkerJs()` — Lädt den Worker-Code per XHR
-- Worker-Blob-String ab Zeile ~122 — Injizierter Code
+Ein Chromium-Fenster öffnet sich, der Stream startet automatisch.  
+Nicht eingeloggt → garantierte Pre-Roll-Werbung.  
+Nach Ablauf der Zeit schließt sich der Browser und der Bericht erscheint.
 
 ---
 
-## Zukünftige Updates (Wiederholung)
+## Was wird erfasst
 
-Twitch ändert seinen Player ca. alle paar Wochen. Folgender Ablauf:
-
-1. **Testen:** Script via Tampermonkey laden, Stream öffnen, Console beobachten
-   - `hookWorkerFetch (vaft)` muss erscheinen → Worker-Hook greift
-   - `Blocking ads (embed)` oder ähnlich → Ad-Blocking aktiv
-   - Falls nichts → Schritt 2–4 oben wiederholen
-
-2. **Häufigste Änderungen die Fixes brauchen:**
-   | Was sich ändert | Wo in vaft.js anpassen |
-   |---|---|
-   | AdSignifier (nicht mehr `stitched`) | Zeile 13: `scope.AdSignifier` |
-   | Access-Token GQL Hash | Zeile 641: `sha256Hash` |
-   | Twitch Client-ID | Zeile 14: `scope.ClientID` |
-   | Worker-Struktur geändert | `hookWorkerFetch()` überarbeiten |
-   | React-Player-API geändert | `getPlayerAndState()` anpassen |
-
-3. **SHA256-Hash aktualisieren:**
-   In der HAR-Datei nach `PlaybackAccessToken` suchen → Request-Body enthält den aktuellen Hash
-
-4. **Client-ID aktualisieren:**
-   In der HAR-Datei nach `gql.twitch.tv` suchen → Request-Header `Client-ID`
+| Datei | Inhalt |
+|---|---|
+| `captures/worker-[ts].js` | Twitch's HLS-Worker-Code (der wichtigste Teil) |
+| `captures/ad-m3u8-[ts].m3u8` | M3U8-Playlist während Werbung mit Ad-Segmenten |
+| `captures/encodings-m3u8-[ts].m3u8` | Stream-Auflösungsliste von Twitch |
+| `captures/twitch-[ts].har` | Alle Netzwerkanfragen (GQL, Headers, Tokens) |
+| `captures/report-[ts].json` | Zusammenfassung + Signifier-Auswertung |
 
 ---
 
-## Schnell-Referenz: Console-Befehle während Test
+## Ergebnis interpretieren
 
-```js
-// Aktuellen Stand prüfen (während vaft.js aktiv):
-window.twitchAdSolutionsVersion  // → sollte 24 sein
-
-// Ads simulieren (zum Testen ohne echte Werbung):
-simulateAds(1)   // Backup-Player aktivieren
-simulateAds(0)   // Zurücksetzen
-
-// Player manuell neu laden:
-reloadTwitchPlayer()
-
-// Alle erfassten Daten speichern (nach capture-worker.js):
-saveCaptured()
-
-// Signifier-Report (nach check-adsignifier.js):
-getSignifierReport()
+### Alles gut
 ```
+Workers erfasst:    1
+Ad-M3U8 erfasst:    3+
+Signifier:          ['stitched']
+```
+→ vaft.js ist noch kompatibel, kein Update nötig.
+
+### Worker nicht erfasst
+```
+[!] KEIN Worker erfasst
+```
+→ Twitch hat die Worker-Struktur geändert.  
+→ `hookWindowWorker()` in vaft.js prüfen, ggf. Worker-Blob manuell analysieren.
+
+### Keine Ads erfasst
+```
+[!] KEINE Ad-M3U8 gefunden
+```
+→ Zwei Möglichkeiten:
+- Kein Werbe-Inventar auf dem Channel (anderen Channel probieren)
+- `AdSignifier` hat sich geändert (nicht mehr `'stitched'`)
+→ Gespeicherte `encodings-m3u8-*.m3u8` öffnen und nach neuen Ad-Tags suchen.
+
+### Unbekannte M3U8-Tags
+```
+[!] Unbekannte M3U8-Tags: ['#EXT-X-TWITCH-NEWMETHOD']
+```
+→ Twitch nutzt eine neue Methode.  
+→ `vaft.js` → `stripAdSegments()` und `processM3U8()` anpassen.
+
+---
+
+## Was in vaft.js prüfen/anpassen
+
+| Problem | Stelle in vaft.js |
+|---|---|
+| AdSignifier geändert | Zeile ~13: `scope.AdSignifier = 'stitched'` |
+| GQL Hash veraltet | Zeile ~641: `sha256Hash: "ed230a..."` → aus HAR aktualisieren |
+| Client-ID veraltet | Zeile ~14: `scope.ClientID` → aus HAR-Headers aktualisieren |
+| Worker-Struktur anders | `hookWorkerFetch()` — Worker-JS aus Capture vergleichen |
+| React-Player-API anders | `getPlayerAndState()` — Twitch-Seite inspizieren |
+
+### SHA256-Hash aus HAR auslesen
+HAR-Datei in VS Code öffnen → nach `PlaybackAccessToken` suchen →  
+im Request-Body steht `sha256Hash`.
+
+### Client-ID aus HAR auslesen
+HAR-Datei → nach `gql.twitch.tv` suchen → Request-Header `Client-ID`.
+
+---
+
+## Manuelle Fallback-Scripts (optional)
+
+Falls das automatische Tool nicht greift:
+
+| Datei | Zweck |
+|---|---|
+| `capture-worker.js` | In DevTools Console einfügen → Worker-Blob + M3U8 manuell speichern |
+| `check-adsignifier.js` | In DevTools Console einfügen → Signifier-Check ohne vaft.js |
