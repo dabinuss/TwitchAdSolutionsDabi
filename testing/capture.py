@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Twitch Ad Capture Tool
-Usage: python capture.py [channel] [dauer_sekunden]
+Usage:
+  python capture.py [channel] [dauer_sekunden]   -- normaler Capture
+  python capture.py --hunt [dauer_pro_channel]   -- Preroll-Hunt: mehrere Channels bis Ad gefunden
 """
 
 import asyncio
@@ -23,9 +25,10 @@ except ImportError:
     print("FEHLER: Playwright nicht installiert. Bitte install.bat ausfuehren.")
     sys.exit(1)
 
-CHANNEL  = sys.argv[1] if len(sys.argv) > 1 else None
-DURATION = int(sys.argv[2]) if len(sys.argv) > 2 else 90
-OUT      = Path(__file__).parent / "captures"
+HUNT_MODE = len(sys.argv) > 1 and sys.argv[1] == '--hunt'
+CHANNEL   = None if HUNT_MODE or len(sys.argv) < 2 else sys.argv[1]
+DURATION  = int(sys.argv[2]) if len(sys.argv) > 2 else (45 if HUNT_MODE else 90)
+OUT       = Path(__file__).parent / "captures"
 
 # Deutschsprachige Channels — der Reihe nach probiert bis einer live ist
 DE_CHANNELS = [
@@ -91,12 +94,13 @@ def check_live_via_api(channel: str) -> bool:
         return False  # Im Zweifel trotzdem versuchen
 
 
-async def main():
+async def main(force_channel=None, force_duration=None):
     OUT.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    duration = force_duration if force_duration is not None else DURATION
 
     # Channel bestimmen — falls nicht angegeben: ersten live DE-Channel finden
-    channel = CHANNEL
+    channel = force_channel or CHANNEL
     if not channel:
         print("\n[+] Suche live DE-Channel ...")
         for ch in DE_CHANNELS:
@@ -114,7 +118,7 @@ async def main():
     print(f"\n{'='*52}")
     print(f"  Twitch Ad Capture Tool")
     print(f"  Channel : {channel}")
-    print(f"  Dauer   : {DURATION}s")
+    print(f"  Dauer   : {duration}s")
     print(f"  Ausgabe : {OUT}")
     print(f"{'='*52}\n")
 
@@ -217,14 +221,14 @@ async def main():
         except Exception as e:
             print(f"[-] Seitenaufruf fehlgeschlagen: {e}")
 
-        print(f"[+] Warte {DURATION}s (Werbung abwarten) ...\n")
-        for i in range(DURATION):
+        print(f"[+] Warte {duration}s (Werbung abwarten) ...\n")
+        for i in range(duration):
             await asyncio.sleep(1)
             # Früh abbrechen wenn VOD erkannt
             if is_vod and i >= 5:
                 print(f"  [!] VOD erkannt — Capture abgebrochen")
                 break
-            if (i + 1) % 15 == 0 or i == DURATION - 1:
+            if (i + 1) % 15 == 0 or i == duration - 1:
                 try:
                     n_workers = await page.evaluate("window._cap.workerUrls.length")
                 except Exception:
@@ -299,7 +303,7 @@ async def main():
     report = {
         "timestamp": ts,
         "channel": channel,
-        "duration_s": DURATION,
+        "duration_s": duration,
         "stream_was_active": stream_active,
         "was_vod": is_vod,
         "workers_blob_found": len(worker_texts),
@@ -344,5 +348,51 @@ async def main():
         print("  [OK] vaft.js scheint noch kompatibel")
 
 
+async def hunt():
+    """Preroll-Hunt: probiert DE-Channels nacheinander bis eine Ad-M3U8 gefunden wird."""
+    per_channel = DURATION  # z.B. 45s pro Channel
+    print(f"\n{'='*52}")
+    print(f"  PREROLL-HUNT  ({per_channel}s pro Channel)")
+    print(f"{'='*52}\n")
+
+    candidates = []
+    print("[+] Prüfe welche Channels live sind ...")
+    for ch in DE_CHANNELS:
+        live = check_live_via_api(ch)
+        status = "LIVE" if live else "offline"
+        print(f"    {ch:25s} {status}")
+        if live:
+            candidates.append(ch)
+
+    if not candidates:
+        print("\n[-] Keine live Channels gefunden.")
+        return
+
+    print(f"\n[+] {len(candidates)} live Channel(s). Starte Hunt ...\n")
+
+    ads_before = sorted(OUT.glob("ad-m3u8-*.m3u8"))
+
+    for ch in candidates:
+        print(f"\n{'─'*52}")
+        print(f"  Teste: {ch}  ({per_channel}s)")
+        print(f"{'─'*52}")
+        await main(force_channel=ch, force_duration=per_channel)
+        ads_after = sorted(OUT.glob("ad-m3u8-*.m3u8"))
+        new_ads = [f for f in ads_after if f not in ads_before]
+        if new_ads:
+            print(f"\n[HUNT OK] Preroll gefunden bei '{ch}'!")
+            for f in new_ads:
+                print(f"         -> {f.name}")
+            print("[HUNT] Hunt beendet.")
+            return
+        ads_before = ads_after
+        print(f"[HUNT] Kein Preroll bei {ch}, naechster ...")
+
+    print("\n[HUNT] Kein Preroll gefunden. Spaeter erneut versuchen.")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    if HUNT_MODE:
+        asyncio.run(hunt())
+    else:
+        asyncio.run(main())

@@ -1147,9 +1147,50 @@ twitch-videoad.js text/javascript
             localStorageHookFailed = true;
         }
     }
+    function blockOverlayAds() {
+        const adSelectors = [
+            '[data-test-selector="ad-banner-default-container"]',
+            '[data-a-target="ad-overlay"]',
+            '[data-a-target="player-ad-overlay"]',
+            '[data-a-target="ad-card-component"]',
+            '.stream-display-ad',
+            '[class*="StreamDisplayAd"]',
+            '[class*="stream-display-ad"]',
+            '[class*="pushdown-ad"]',
+            '[class*="audio-ad-overlay"]',
+            '[class*="AudioAdOverlay"]',
+            '.channel-skins-video-overlay',
+            '[class*="ChannelSkins"]',
+            '[class*="brand-display"]',
+            '[class*="BrandDisplay"]',
+        ];
+        function hideAds(root) {
+            for (const sel of adSelectors) {
+                try {
+                    for (const el of root.querySelectorAll(sel)) {
+                        if (el.style.display !== 'none') {
+                            el.style.setProperty('display', 'none', 'important');
+                            console.log('[vaft] Blocked overlay ad:', sel);
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
+        hideAds(document);
+        new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                for (const node of m.addedNodes) {
+                    if (node.nodeType === 1) {
+                        hideAds(node.parentElement || document);
+                    }
+                }
+            }
+        }).observe(document.documentElement, { childList: true, subtree: true });
+    }
     declareOptions(window);
     hookWindowWorker();
     hookFetch();
+    blockOverlayAds();
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
     }
