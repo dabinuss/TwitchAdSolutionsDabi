@@ -1,125 +1,133 @@
 #!/usr/bin/env python3
 """
 Twitch Ad Capture Tool
-Öffnet automatisch einen Twitch-Channel und erfasst:
-  - HLS Worker Blob (Twitch's interner Player-Code)
-  - M3U8-Dateien mit Ad-Segmenten
-  - HAR-Datei (alle Netzwerkanfragen)
-  - Bericht über gefundene/unbekannte Ad-Signifier
-
-Usage:
-  python capture.py [channel] [dauer_sekunden]
-  python capture.py xqc 90
+Usage: python capture.py [channel] [dauer_sekunden]
 """
 
 import asyncio
 import sys
 import os
+import re
 import json
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+# Windows-Terminal: UTF-8 erzwingen
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 try:
     from playwright.async_api import async_playwright
 except ImportError:
-    print("FEHLER: Playwright nicht installiert.")
-    print("Bitte install.bat ausführen.")
+    print("FEHLER: Playwright nicht installiert. Bitte install.bat ausfuehren.")
     sys.exit(1)
 
-# --- Konfiguration ---
 CHANNEL  = sys.argv[1] if len(sys.argv) > 1 else "esl_csgo"
 DURATION = int(sys.argv[2]) if len(sys.argv) > 2 else 90
 OUT      = Path(__file__).parent / "captures"
 
-KNOWN_M3U8_TAGS = {
-    "#EXT-X-STREAM-INF", "#EXT-X-MEDIA", "#EXT-X-VERSION",
-    "#EXT-X-TARGETDURATION", "#EXT-X-MEDIA-SEQUENCE",
-    "#EXT-X-TWITCH-PREFETCH", "#EXT-X-TWITCH-PREFETCH-DISCONTINUITY",
-    "#EXT-X-DISCONTINUITY", "#EXT-X-PROGRAM-DATE-TIME",
-    "#EXT-X-SESSION-DATA", "#EXT-X-INDEPENDENT-SEGMENTS",
-    "#EXT-X-ENDLIST", "#EXT-X-KEY",
-}
-
-# Dieses Script wird vor dem Twitch-Code in den Browser injiziert
+# In den Browser injiziert (vor Twitch-Code) — nur Worker-Blob abfangen
 INJECT_JS = r"""
 (function () {
-    window._cap = { workers: [], m3u8Ads: [], m3u8Enc: [], signifiers: {}, unknownTags: {} };
-
-    const SIGNIFIERS = ['stitched', 'X-TV-TWITCH-AD', 'MIDROLL', 'PREROLL'];
-
-    // Worker-Blob abfangen
-    const OrigWorker = window.Worker;
-    window.Worker = class extends OrigWorker {
-        constructor(url, opts) {
-            super(url, opts);
-            if (typeof url === 'string' && url.startsWith('blob:')) {
-                fetch(url).then(r => r.text()).then(text => {
-                    window._cap.workers.push({ url, text, ts: Date.now() });
-                    console.log('[cap] Worker blob erfasst, Länge:', text.length);
-                }).catch(() => {});
-            }
+    window._cap = { workerUrls: [], workerTexts: [] };
+    const Orig = window.Worker;
+    window.Worker = function (url, opts) {
+        const w = new Orig(url, opts);
+        if (typeof url === 'string' && url.startsWith('blob:')) {
+            window._cap.workerUrls.push(url);
+            fetch(url)
+                .then(r => r.text())
+                .then(t => { window._cap.workerTexts.push(t); })
+                .catch(() => {});
         }
+        return w;
     };
-
-    // fetch abfangen → M3U8-Dateien analysieren
-    const origFetch = window.fetch;
-    window.fetch = async function (url, opts) {
-        const resp = await origFetch.apply(this, arguments);
-        if (typeof url !== 'string') return resp;
-
-        const isEnc = url.includes('usher.ttvnw.net') || url.includes('/channel/hls/');
-        const isSeg = !isEnc && (url.endsWith('.m3u8') || url.includes('.m3u8?'));
-
-        if (isEnc || isSeg) {
-            resp.clone().text().then(text => {
-                // bekannte Signifier
-                SIGNIFIERS.forEach(s => {
-                    if (text.includes(s) && !window._cap.signifiers[s])
-                        window._cap.signifiers[s] = { url, ts: Date.now() };
-                });
-                // unbekannte #EXT-X-* Tags
-                (text.match(/#EXT-X-[A-Z0-9\-]+/g) || []).forEach(tag => {
-                    if (!window._cap.unknownTags[tag] && ![
-                        '#EXT-X-STREAM-INF','#EXT-X-MEDIA','#EXT-X-VERSION',
-                        '#EXT-X-TARGETDURATION','#EXT-X-MEDIA-SEQUENCE',
-                        '#EXT-X-TWITCH-PREFETCH','#EXT-X-TWITCH-PREFETCH-DISCONTINUITY',
-                        '#EXT-X-DISCONTINUITY','#EXT-X-PROGRAM-DATE-TIME',
-                        '#EXT-X-SESSION-DATA','#EXT-X-INDEPENDENT-SEGMENTS',
-                        '#EXT-X-ENDLIST','#EXT-X-KEY'
-                    ].includes(tag)) {
-                        window._cap.unknownTags[tag] = { url, ts: Date.now() };
-                        console.log('[cap] Unbekannter M3U8-Tag:', tag);
-                    }
-                });
-
-                if (isEnc) {
-                    if (window._cap.m3u8Enc.length < 3)
-                        window._cap.m3u8Enc.push({ url, text, ts: Date.now() });
-                } else if (text.includes('stitched') || text.includes('X-TV-TWITCH-AD')) {
-                    window._cap.m3u8Ads.push({ url, text, ts: Date.now() });
-                    console.log('[cap] Ad-M3U8 erfasst!');
-                }
-            }).catch(() => {});
-        }
-        return resp;
-    };
-
-    console.log('[cap] Hooks aktiv');
+    window.Worker.prototype = Orig.prototype;
+    console.log('[cap] Worker-Hook aktiv');
 })();
 """
+
+
+def fetch_url(url: str) -> str:
+    """Einfacher HTTP-GET ohne externe Deps."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read().decode("utf-8", errors="replace")
 
 
 async def main():
     OUT.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(f"\n{'='*52}")
+    print(f"  Twitch Ad Capture Tool")
+    print(f"  Channel : {CHANNEL}")
+    print(f"  Dauer   : {DURATION}s")
+    print(f"  Ausgabe : {OUT}")
+    print(f"{'='*52}\n")
+
     har_path = str(OUT / f"twitch-{ts}.har")
 
-    print(f"\n{'='*50}")
-    print(f"  Twitch Ad Capture")
-    print(f"  Channel:  {CHANNEL}")
-    print(f"  Dauer:    {DURATION}s")
-    print(f"  Ausgabe:  {OUT}")
-    print(f"{'='*50}\n")
+    # Gesammelte Daten
+    m3u8_enc  = []   # Encodings-M3U8 (Auflösungsliste)
+    m3u8_ads  = []   # Segment-M3U8 mit Ad-Signifier
+    m3u8_all  = []   # alle Segment-M3U8 (max 5 unique)
+    signifiers_found = {}
+    unknown_tags     = {}
+
+    KNOWN_SIGNIFIERS = ["stitched", "X-TV-TWITCH-AD", "MIDROLL", "PREROLL"]
+    KNOWN_TAGS = {
+        "#EXT-X-STREAM-INF", "#EXT-X-MEDIA", "#EXT-X-VERSION",
+        "#EXT-X-TARGETDURATION", "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-TWITCH-PREFETCH", "#EXT-X-TWITCH-PREFETCH-DISCONTINUITY",
+        "#EXT-X-DISCONTINUITY", "#EXT-X-PROGRAM-DATE-TIME",
+        "#EXT-X-SESSION-DATA", "#EXT-X-INDEPENDENT-SEGMENTS",
+        "#EXT-X-ENDLIST", "#EXT-X-KEY",
+    }
+    seen_m3u8_urls = set()
+    stream_active  = False
+
+    async def on_response(response):
+        nonlocal stream_active
+        url = response.url
+        try:
+            if "usher.ttvnw.net" in url or "/channel/hls/" in url:
+                text = await response.text()
+                if "#EXT-X" in text or "#EXTM3U" in text:
+                    m3u8_enc.append({"url": url, "text": text})
+                    stream_active = True
+                return
+
+            if (".m3u8" in url) and url not in seen_m3u8_urls:
+                seen_m3u8_urls.add(url)
+                text = await response.text()
+                if not text.strip():
+                    return
+
+                # Signifier prüfen
+                for sig in KNOWN_SIGNIFIERS:
+                    if sig in text and sig not in signifiers_found:
+                        signifiers_found[sig] = url
+                        print(f"  [!] Signifier gefunden: '{sig}'")
+
+                # Unbekannte Tags
+                for tag in re.findall(r"#EXT-X-[A-Z0-9\-]+", text):
+                    if tag not in KNOWN_TAGS and tag not in unknown_tags:
+                        unknown_tags[tag] = url
+                        print(f"  [?] Unbekannter Tag: {tag}")
+
+                is_ad = any(s in text for s in ["stitched", "X-TV-TWITCH-AD"])
+                if is_ad:
+                    m3u8_ads.append({"url": url, "text": text})
+                    print(f"  [AD] Ad-M3U8 erfasst!")
+                    stream_active = True
+
+                if len(m3u8_all) < 5:
+                    m3u8_all.append({"url": url, "text": text})
+                    stream_active = True
+        except Exception:
+            pass
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -127,6 +135,7 @@ async def main():
             args=[
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
             ],
         )
         ctx = await browser.new_context(
@@ -135,30 +144,41 @@ async def main():
         )
         await ctx.add_init_script(INJECT_JS)
         page = await ctx.new_page()
+        page.on("response", on_response)
 
-        print(f"[+] Öffne twitch.tv/{CHANNEL} ...")
-        await page.goto(f"https://www.twitch.tv/{CHANNEL}", wait_until="domcontentloaded")
+        print(f"[+] Oeffne twitch.tv/{CHANNEL} ...")
+        try:
+            await page.goto(
+                f"https://www.twitch.tv/{CHANNEL}",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+        except Exception as e:
+            print(f"[-] Seitenaufruf fehlgeschlagen: {e}")
+
         print(f"[+] Warte {DURATION}s (Werbung abwarten) ...\n")
-
         for i in range(DURATION):
             await asyncio.sleep(1)
             if (i + 1) % 15 == 0 or i == DURATION - 1:
                 try:
-                    w  = await page.evaluate("window._cap.workers.length")
-                    a  = await page.evaluate("window._cap.m3u8Ads.length")
-                    sg = await page.evaluate("Object.keys(window._cap.signifiers)")
-                    ut = await page.evaluate("Object.keys(window._cap.unknownTags)")
-                    print(f"  [{i+1:3d}s] Workers: {w}  Ad-M3U8: {a}  "
-                          f"Signifier: {sg}  Unbekannte Tags: {ut}")
+                    n_workers = await page.evaluate("window._cap.workerUrls.length")
                 except Exception:
-                    print(f"  [{i+1:3d}s] (Seite noch nicht bereit)")
+                    n_workers = "?"
+                print(
+                    f"  [{i+1:3d}s]  Workers: {n_workers}"
+                    f"  Enc-M3U8: {len(m3u8_enc)}"
+                    f"  Ad-M3U8: {len(m3u8_ads)}"
+                    f"  Signifier: {list(signifiers_found.keys())}"
+                    f"  Stream aktiv: {stream_active}"
+                )
 
-        print("\n[+] Extrahiere Daten ...")
+        # Worker-Blobs aus dem Browser holen
+        print("\n[+] Extrahiere Worker-Daten ...")
         try:
-            cap = await page.evaluate("JSON.parse(JSON.stringify(window._cap))")
-        except Exception as e:
-            print(f"[-] Fehler beim Extrahieren: {e}")
-            cap = {"workers": [], "m3u8Ads": [], "m3u8Enc": [], "signifiers": {}, "unknownTags": {}}
+            worker_texts = await page.evaluate("window._cap.workerTexts")
+            worker_urls  = await page.evaluate("window._cap.workerUrls")
+        except Exception:
+            worker_texts, worker_urls = [], []
 
         await ctx.close()
         await browser.close()
@@ -166,31 +186,62 @@ async def main():
     # --- Dateien speichern ---
     saved = []
 
-    for i, w in enumerate(cap.get("workers", [])):
-        p = OUT / f"worker-{ts}-{i}.js"
-        p.write_text(w["text"], encoding="utf-8")
+    # Worker-Blobs speichern + importScripts-URL auflösen
+    real_worker_urls = set()
+    for i, text in enumerate(worker_texts):
+        p = OUT / f"worker-blob-{ts}-{i}.js"
+        p.write_text(text, encoding="utf-8")
         saved.append(str(p))
-        print(f"[+] Worker gespeichert: {p.name}  ({len(w['text']):,} Zeichen)")
+        print(f"[+] Worker-Blob gespeichert: {p.name}  ({len(text):,} Zeichen)")
 
-    for i, m in enumerate(cap.get("m3u8Ads", [])):
+        # importScripts-URL extrahieren und herunterladen
+        matches = re.findall(r"importScripts\(['\"]([^'\"]+)['\"]\)", text)
+        real_worker_urls.update(matches)
+
+    for url in real_worker_urls:
+        print(f"[+] Lade echten Worker-Code: {url}")
+        fname = re.sub(r"[^a-zA-Z0-9.\-_]", "_", url.split("/")[-1])
+        p = OUT / f"worker-real-{ts}-{fname}"
+        try:
+            content = fetch_url(url)
+            p.write_text(content, encoding="utf-8")
+            saved.append(str(p))
+            print(f"    -> {p.name}  ({len(content):,} Zeichen)")
+        except Exception as e:
+            print(f"    -> FEHLER: {e}")
+
+    # Encodings-M3U8
+    for i, m in enumerate(m3u8_enc[:3]):
+        p = OUT / f"encodings-m3u8-{ts}-{i}.m3u8"
+        p.write_text(m["text"], encoding="utf-8")
+        saved.append(str(p))
+
+    # Ad-M3U8
+    for i, m in enumerate(m3u8_ads):
         p = OUT / f"ad-m3u8-{ts}-{i}.m3u8"
         p.write_text(m["text"], encoding="utf-8")
         saved.append(str(p))
         print(f"[+] Ad-M3U8 gespeichert: {p.name}")
 
-    for i, m in enumerate(cap.get("m3u8Enc", [])):
-        p = OUT / f"encodings-m3u8-{ts}-{i}.m3u8"
-        p.write_text(m["text"], encoding="utf-8")
-        saved.append(str(p))
+    # Normale M3U8 (falls keine Ads)
+    if not m3u8_ads:
+        for i, m in enumerate(m3u8_all):
+            p = OUT / f"segment-m3u8-{ts}-{i}.m3u8"
+            p.write_text(m["text"], encoding="utf-8")
+            saved.append(str(p))
 
+    # Report
     report = {
         "timestamp": ts,
         "channel": CHANNEL,
         "duration_s": DURATION,
-        "workers_found": len(cap.get("workers", [])),
-        "ad_m3u8_found": len(cap.get("m3u8Ads", [])),
-        "signifiers": cap.get("signifiers", {}),
-        "unknown_tags": cap.get("unknownTags", {}),
+        "stream_was_active": stream_active,
+        "workers_blob_found": len(worker_texts),
+        "workers_real_urls": list(real_worker_urls),
+        "enc_m3u8_found": len(m3u8_enc),
+        "ad_m3u8_found": len(m3u8_ads),
+        "signifiers_found": signifiers_found,
+        "unknown_tags": unknown_tags,
         "saved_files": saved,
         "har_file": har_path,
     }
@@ -198,33 +249,30 @@ async def main():
     rp.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # --- Zusammenfassung ---
-    print(f"\n{'='*50}")
+    print(f"\n{'='*52}")
     print("  ERGEBNIS")
-    print(f"{'='*50}")
-    print(f"  Workers erfasst:    {report['workers_found']}")
-    print(f"  Ad-M3U8 erfasst:    {report['ad_m3u8_found']}")
-    print(f"  Signifier:          {list(report['signifiers'].keys())}")
-    print(f"  Unbekannte Tags:    {list(report['unknown_tags'].keys())}")
-    print(f"  HAR:                {Path(har_path).name}")
-    print(f"  Report:             {rp.name}")
-    print(f"  Ausgabe-Ordner:     {OUT}\n")
+    print(f"{'='*52}")
+    print(f"  Stream aktiv:        {stream_active}")
+    print(f"  Worker-Blobs:        {report['workers_blob_found']}")
+    print(f"  Echter Worker-Code:  {len(real_worker_urls)} URL(s)")
+    print(f"  Encodings-M3U8:      {report['enc_m3u8_found']}")
+    print(f"  Ad-M3U8:             {report['ad_m3u8_found']}")
+    print(f"  Signifier:           {list(signifiers_found.keys())}")
+    print(f"  Unbekannte Tags:     {list(unknown_tags.keys())}")
+    print(f"  Ausgabe:             {OUT}")
+    print()
 
-    # Warnungen
-    if report["workers_found"] == 0:
-        print("  [!] KEIN Worker erfasst")
-        print("      → Worker-Hook in vaft.js könnte veraltet sein\n")
-    if report["ad_m3u8_found"] == 0:
-        print("  [!] KEINE Ad-M3U8 gefunden")
-        print("      → Entweder keine Werbung geschaltet ODER")
-        print("        AdSignifier hat sich geändert (aktuell: 'stitched')\n")
-    if report["unknown_tags"]:
-        print("  [!] Unbekannte M3U8-Tags gefunden:")
-        for tag, info in report["unknown_tags"].items():
-            print(f"      {tag}  (in: {info['url'][:60]}...)")
-        print("      → Könnten neue Twitch Ad-Methoden sein!\n")
-
-    if report["workers_found"] > 0 and report["ad_m3u8_found"] > 0:
-        print("  [OK] Alles erfasst — vaft.js scheint noch kompatibel\n")
+    if not stream_active:
+        print("  [!] Kein Stream gefunden — Channel offline?")
+        print("      Tipp: run.bat [anderer_channel] aufrufen")
+    if report["workers_blob_found"] == 0:
+        print("  [!] Kein Worker erfasst — Worker-Hook in vaft.js pruefen")
+    if stream_active and report["ad_m3u8_found"] == 0:
+        print("  [!] Keine Ad-M3U8 — kein Werbe-Inventar oder AdSignifier veraendert")
+    if unknown_tags:
+        print("  [!] Unbekannte Tags -> neue Twitch-Methode moeglich!")
+    if stream_active and report["workers_blob_found"] > 0 and not unknown_tags:
+        print("  [OK] vaft.js scheint noch kompatibel")
 
 
 if __name__ == "__main__":
