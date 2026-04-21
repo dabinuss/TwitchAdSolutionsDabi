@@ -122,6 +122,7 @@ twitch-videoad.js text/javascript
                     const pendingFetchRequests = new Map();
                     ${stripAdSegments.toString()}
                     ${getStreamUrlForResolution.toString()}
+                    ${extractAdInfo.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
                     ${declareOptions.toString()}
